@@ -203,6 +203,15 @@
   background: #eef4ff;
 }
 
+.search-empty-state {
+  padding: 0.7rem 0.82rem;
+  border: 1px dashed #dde3eb;
+  border-radius: 12px;
+  color: var(--muted);
+  background: #fff;
+  font-size: 0.79rem;
+}
+
 .tag-row {
   display: flex;
   align-items: center;

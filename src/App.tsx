@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { JSONContent } from '@tiptap/core'
 import { EditorContent, useEditor, useEditorState } from '@tiptap/react'
 import {
@@ -84,7 +84,6 @@ function App() {
   const [saveMessage, setSaveMessage] = useState('Connecting to Supabase…')
   const [cloudUserId, setCloudUserId] = useState('')
   const [isCloudReady, setIsCloudReady] = useState(false)
-  const deferredTagSearch = useDeferredValue(tagSearch)
   const notesRef = useRef(notes)
   const hasPendingSaveRef = useRef(false)
   const cloudSyncTimeoutRef = useRef<number | null>(null)
@@ -247,21 +246,40 @@ function App() {
   const effectiveSelectedTagId = tagSummaries.some((tag) => tag.id === selectedTagId)
     ? selectedTagId
     : ''
-  const normalizedSearch = normalizeTag(deferredTagSearch)
-  const visibleTags = tagSummaries.filter((tag) => {
-    if (!normalizedSearch) {
-      return true
-    }
+  const normalizedSearch = normalizeTag(tagSearch)
+  const searchTerm = tagSearch.trim().replace(/^#+/, '').toLowerCase()
+  const visibleTags = tagSummaries
+    .filter((tag) => {
+      if (!normalizedSearch) {
+        return true
+      }
 
-    return (
-      tag.id.includes(normalizedSearch) ||
-      tag.label.toLowerCase().includes(deferredTagSearch.trim().toLowerCase())
-    )
-  })
-  const activeTagId =
-    effectiveSelectedTagId || (visibleTags.length === 1 ? visibleTags[0].id : '')
-  const activeTagResults = activeTagId ? findTagResults(notes, activeTagId) : []
+      return tag.id.includes(normalizedSearch) || tag.label.toLowerCase().includes(searchTerm)
+    })
+    .sort((left, right) => {
+      if (!normalizedSearch) {
+        return left.label.localeCompare(right.label)
+      }
+
+      const leftLabel = left.label.toLowerCase()
+      const rightLabel = right.label.toLowerCase()
+      const leftStarts = left.id.startsWith(normalizedSearch) || leftLabel.startsWith(searchTerm)
+      const rightStarts =
+        right.id.startsWith(normalizedSearch) || rightLabel.startsWith(searchTerm)
+
+      if (leftStarts !== rightStarts) {
+        return leftStarts ? -1 : 1
+      }
+
+      return left.label.localeCompare(right.label)
+    })
   const tagSearchSuggestions = visibleTags.slice(0, 8)
+  const activeTagId = effectiveSelectedTagId || tagSearchSuggestions[0]?.id || ''
+  const activeTagResults = activeTagId ? findTagResults(notes, activeTagId) : []
+  const activeTagLabel = tagSummaries.find((tag) => tag.id === activeTagId)?.label ?? activeTagId
+
+  const hasNoTagMatches = Boolean(normalizedSearch) && !tagSearchSuggestions.length
+  const shouldShowSuggestionList = Boolean(normalizedSearch)
 
   function updateCurrentNote(patch: Partial<Pick<Note, 'title' | 'content'>>) {
     setSaveState('saving')
@@ -312,9 +330,14 @@ function App() {
     }
   }
 
+  function handleTagSelection(tagId: string, tagLabel?: string) {
+    setSelectedTagId(tagId)
+    setTagSearch(tagLabel ?? tagSummaries.find((tag) => tag.id === tagId)?.label ?? tagId)
+  }
+
   function handleSearchSubmit() {
-    if (visibleTags[0]) {
-      setSelectedTagId(visibleTags[0].id)
+    if (tagSearchSuggestions[0]) {
+      handleTagSelection(tagSearchSuggestions[0].id, tagSearchSuggestions[0].label)
     }
   }
 
@@ -479,15 +502,14 @@ function App() {
                     />
                   </label>
 
-                  {tagSearchSuggestions.length ? (
+                  {shouldShowSuggestionList && tagSearchSuggestions.length ? (
                     <div className="search-suggestion-list" role="listbox" aria-label="Tag suggestions">
                       {tagSearchSuggestions.map((tag) => (
                         <button
                           key={tag.id}
                           className={`search-suggestion-item${activeTagId === tag.id ? ' active' : ''}`}
                           onClick={() => {
-                            setTagSearch(tag.label)
-                            setSelectedTagId(tag.id)
+                            handleTagSelection(tag.id, tag.label)
                           }}
                           type="button"
                         >
@@ -498,12 +520,16 @@ function App() {
                     </div>
                   ) : null}
 
+                  {hasNoTagMatches ? (
+                    <div className="search-empty-state">No saved tags match this search.</div>
+                  ) : null}
+
                   <div className="tag-list">
                     {visibleTags.slice(0, 18).map((tag) => (
                       <button
                         key={tag.id}
                         className={`tag-row${activeTagId === tag.id ? ' active' : ''}`}
-                        onClick={() => setSelectedTagId(tag.id)}
+                        onClick={() => handleTagSelection(tag.id, tag.label)}
                         type="button"
                       >
                         <span>#{tag.label}</span>
@@ -515,7 +541,7 @@ function App() {
                   {activeTagId ? (
                     <div className="tag-results">
                       <div className="tag-results-header">
-                        <strong>#{tagSummaries.find((tag) => tag.id === activeTagId)?.label ?? activeTagId}</strong>
+                        <strong>#{activeTagLabel}</strong>
                         <span>{activeTagResults.length}</span>
                       </div>
                       {activeTagResults.map((result) => (
