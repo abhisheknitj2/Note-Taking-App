@@ -161,6 +161,48 @@
   background: transparent;
 }
 
+.search-suggestion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: -2px;
+  padding: 6px;
+  border: 1px solid #dde3eb;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+}
+
+.search-suggestion-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 0.58rem 0.68rem;
+  border: 0;
+  border-radius: 10px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-suggestion-item strong {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.search-suggestion-item span {
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.search-suggestion-item:hover,
+.search-suggestion-item.active {
+  background: #eef4ff;
+}
+
 .tag-row {
   display: flex;
   align-items: center;

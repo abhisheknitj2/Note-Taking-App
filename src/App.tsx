@@ -26,6 +26,7 @@ import {
   Undo2,
 } from 'lucide-react'
 import { createEditorExtensions } from './editor/extensions'
+import type { TagSuggestionItem } from './editor/tagSuggestion'
 import {
   createNote,
   extractNotePreview,
@@ -239,6 +240,10 @@ function App() {
 
   const activeNote = notes.find((note) => note.id === activeNoteId) ?? notes[0]
   const tagSummaries = getTagSummaries(notes)
+  const tagSuggestionItems: TagSuggestionItem[] = tagSummaries.map((tag) => ({
+    id: tag.id,
+    label: tag.label,
+  }))
   const effectiveSelectedTagId = tagSummaries.some((tag) => tag.id === selectedTagId)
     ? selectedTagId
     : ''
@@ -256,6 +261,7 @@ function App() {
   const activeTagId =
     effectiveSelectedTagId || (visibleTags.length === 1 ? visibleTags[0].id : '')
   const activeTagResults = activeTagId ? findTagResults(notes, activeTagId) : []
+  const tagSearchSuggestions = visibleTags.slice(0, 8)
 
   function updateCurrentNote(patch: Partial<Pick<Note, 'title' | 'content'>>) {
     setSaveState('saving')
@@ -388,6 +394,7 @@ function App() {
               onFocusHandled={() => setPendingTagFocus(null)}
               onTitleChange={(title) => updateCurrentNote({ title })}
               pendingTagFocus={pendingTagFocus}
+              tagSuggestions={tagSuggestionItems}
             />
           ) : null}
 
@@ -472,6 +479,25 @@ function App() {
                     />
                   </label>
 
+                  {tagSearchSuggestions.length ? (
+                    <div className="search-suggestion-list" role="listbox" aria-label="Tag suggestions">
+                      {tagSearchSuggestions.map((tag) => (
+                        <button
+                          key={tag.id}
+                          className={`search-suggestion-item${activeTagId === tag.id ? ' active' : ''}`}
+                          onClick={() => {
+                            setTagSearch(tag.label)
+                            setSelectedTagId(tag.id)
+                          }}
+                          type="button"
+                        >
+                          <strong>#{tag.label}</strong>
+                          <span>{tag.count} matches</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
                   <div className="tag-list">
                     {visibleTags.slice(0, 18).map((tag) => (
                       <button
@@ -530,6 +556,7 @@ type EditorPanelProps = {
   onTitleChange: (title: string) => void
   pendingTagFocus: PendingTagFocus | null
   onFocusHandled: () => void
+  tagSuggestions: TagSuggestionItem[]
 }
 
 function EditorPanel({
@@ -538,9 +565,25 @@ function EditorPanel({
   onTitleChange,
   pendingTagFocus,
   onFocusHandled,
+  tagSuggestions,
 }: EditorPanelProps) {
   const activeNoteRef = useRef(note.id)
-  const [extensions] = useState(() => createEditorExtensions())
+  const [tagSuggestionStore] = useState(() => ({
+    items: tagSuggestions,
+    getItems() {
+      return this.items
+    },
+    setItems(nextItems: TagSuggestionItem[]) {
+      this.items = nextItems
+    },
+  }))
+  const [extensions] = useState(() =>
+    createEditorExtensions(() => tagSuggestionStore.getItems()),
+  )
+
+  useEffect(() => {
+    tagSuggestionStore.setItems(tagSuggestions)
+  }, [tagSuggestionStore, tagSuggestions])
 
   const editor = useEditor({
     extensions,

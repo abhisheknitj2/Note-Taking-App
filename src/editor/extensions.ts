@@ -14,7 +14,6 @@ import {
   createTagSuggestionRenderer,
   type TagSuggestionItem,
 } from './tagSuggestion'
-import { getTagSummaries, loadNotes } from '../lib/notes'
 import { normalizeTag } from '../lib/tags'
 
 declare module '@tiptap/core' {
@@ -138,7 +137,9 @@ const Tag = Mention.extend({
   },
 })
 
-export function createEditorExtensions() {
+export function createEditorExtensions(
+  getTagItems: () => TagSuggestionItem[] = () => [],
+) {
   return [
     StarterKit.configure({
       blockquote: false,
@@ -172,7 +173,7 @@ export function createEditorExtensions() {
         char: '#',
         items: ({ query }) => {
           const normalizedQuery = query.trim().toLowerCase()
-          const catalog = getTagSummaries(loadNotes())
+          const catalog = getTagItems()
           const matches: TagSuggestionItem[] = catalog.filter((item) => {
             if (!normalizedQuery) {
               return true
