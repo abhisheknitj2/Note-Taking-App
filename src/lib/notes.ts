@@ -14,6 +14,11 @@ export type SaveNotesResult = {
   error?: string
 }
 
+export type SyncBufferSnapshot = {
+  notes: Note[]
+  updatedAt: string
+}
+
 type TagSummary = {
   id: string
   label: string
@@ -31,6 +36,7 @@ type TagResult = {
 }
 
 export const STORAGE_KEY = 'quiet-notes::notes'
+export const SYNC_BUFFER_KEY = 'quiet-notes::sync-buffer'
 
 const EMPTY_DOCUMENT: JSONContent = {
   type: 'doc',
@@ -111,6 +117,52 @@ export function saveNotes(notes: Note[]): SaveNotesResult {
       ok: false,
       error: error instanceof Error ? error.message : 'Unable to save notes locally.',
     }
+  }
+}
+
+export function loadSyncBuffer(): SyncBufferSnapshot | null {
+  try {
+    const raw = window.localStorage.getItem(SYNC_BUFFER_KEY)
+
+    if (!raw) {
+      return null
+    }
+
+    const parsed = JSON.parse(raw) as Partial<SyncBufferSnapshot>
+    const notes = parseStoredNotes(JSON.stringify(parsed.notes ?? null))
+
+    if (!notes?.length) {
+      return null
+    }
+
+    return {
+      notes,
+      updatedAt:
+        typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    }
+  } catch {
+    return null
+  }
+}
+
+export function saveSyncBuffer(snapshot: SyncBufferSnapshot): SaveNotesResult {
+  try {
+    window.localStorage.setItem(SYNC_BUFFER_KEY, JSON.stringify(snapshot))
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof Error ? error.message : 'Unable to save pending sync buffer locally.',
+    }
+  }
+}
+
+export function clearSyncBuffer(): void {
+  try {
+    window.localStorage.removeItem(SYNC_BUFFER_KEY)
+  } catch {
+    // Ignore buffer cleanup failures.
   }
 }
 

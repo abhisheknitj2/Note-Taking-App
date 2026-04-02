@@ -296,6 +296,10 @@
   color: #ffe08a;
 }
 
+.workspace-save-state.offline {
+  color: #ffd38a;
+}
+
 .workspace-page {
   padding: 18px 20px 28px;
 }

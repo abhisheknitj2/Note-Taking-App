@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSONContent } from '@tiptap/core'
 import { EditorContent, useEditor, useEditorState } from '@tiptap/react'
 import {
@@ -28,11 +28,14 @@ import {
 import { createEditorExtensions } from './editor/extensions'
 import type { TagSuggestionItem } from './editor/tagSuggestion'
 import {
+  clearSyncBuffer,
   createNote,
   extractNotePreview,
   findTagResults,
   formatNoteDate,
   getTagSummaries,
+  loadSyncBuffer,
+  saveSyncBuffer,
   type Note,
 } from './lib/notes'
 import {
@@ -51,7 +54,7 @@ type PendingTagFocus = {
 }
 
 type PageView = 'editor' | 'notes' | 'tags'
-type SaveState = 'saved' | 'saving' | 'error' | 'sync'
+type SaveState = 'saved' | 'saving' | 'error' | 'sync' | 'offline'
 
 const FONT_FAMILIES = [
   { label: 'Aptos Sans', value: 'Aptos, Manrope, sans-serif' },
@@ -72,6 +75,12 @@ const LINE_HEIGHTS = [
 const TEXT_COLORS = ['#1f2328', '#5f6368', '#0b57d0', '#196c2e', '#b3261e', '#7c4dff']
 const HIGHLIGHT_COLORS = ['#fff59d', '#ffd9a8', '#b9f6ca', '#d7efff', '#f0d9ff', '#ffd6e7']
 const PARAGRAPH_STYLES = [{ label: 'Normal text', value: 'paragraph' }]
+const SAVE_DEBOUNCE_MS = 450
+const RETRY_DELAY_MS = 2500
+
+function getOnlineStatus() {
+  return typeof navigator === 'undefined' ? true : navigator.onLine
+}
 
 function App() {
   const [notes, setNotes] = useState<Note[]>([])
@@ -84,14 +93,91 @@ function App() {
   const [saveMessage, setSaveMessage] = useState('Connecting to Supabase…')
   const [cloudUserId, setCloudUserId] = useState('')
   const [isCloudReady, setIsCloudReady] = useState(false)
+  const [isOnline, setIsOnline] = useState(getOnlineStatus)
   const notesRef = useRef(notes)
   const hasPendingSaveRef = useRef(false)
   const cloudSyncTimeoutRef = useRef<number | null>(null)
+  const retryTimeoutRef = useRef<number | null>(null)
   const skipNextCloudSyncRef = useRef(false)
+  const cloudUserIdRef = useRef('')
+  const syncInFlightRef = useRef(false)
+  const flushPendingSyncRef = useRef<() => Promise<void>>(async () => {})
 
   useEffect(() => {
     notesRef.current = notes
   }, [notes])
+
+  useEffect(() => {
+    cloudUserIdRef.current = cloudUserId
+  }, [cloudUserId])
+
+  const clearSyncTimers = useCallback(() => {
+    if (cloudSyncTimeoutRef.current) {
+      window.clearTimeout(cloudSyncTimeoutRef.current)
+      cloudSyncTimeoutRef.current = null
+    }
+
+    if (retryTimeoutRef.current) {
+      window.clearTimeout(retryTimeoutRef.current)
+      retryTimeoutRef.current = null
+    }
+  }, [])
+
+  const persistPendingBuffer = useCallback((nextNotes: Note[]) => {
+    const result = saveSyncBuffer({
+      notes: nextNotes,
+      updatedAt: new Date().toISOString(),
+    })
+
+    if (!result.ok) {
+      setSaveState('error')
+      setSaveMessage(`Sync buffer failed: ${result.error}`)
+      return false
+    }
+
+    return true
+  }, [])
+
+  const flushPendingSync = useCallback(async () => {
+    if (!cloudUserIdRef.current || !notesRef.current.length || !getOnlineStatus()) {
+      return
+    }
+
+    if (syncInFlightRef.current) {
+      return
+    }
+
+    syncInFlightRef.current = true
+    const snapshot = notesRef.current
+    const syncResult = await syncCloudNotes(cloudUserIdRef.current, snapshot)
+    syncInFlightRef.current = false
+
+    if (syncResult.ok) {
+      clearSyncBuffer()
+      hasPendingSaveRef.current = false
+      setSaveState('saved')
+      setSaveMessage('All changes saved to Supabase.')
+      return
+    }
+
+    hasPendingSaveRef.current = true
+    persistPendingBuffer(snapshot)
+    setSaveState(getOnlineStatus() ? 'error' : 'offline')
+    setSaveMessage(
+      getOnlineStatus()
+        ? `Sync failed. Retrying… ${syncResult.error}`
+        : 'Offline. Changes are queued and will sync when you reconnect.',
+    )
+
+    clearSyncTimers()
+    retryTimeoutRef.current = window.setTimeout(() => {
+      void flushPendingSyncRef.current()
+    }, RETRY_DELAY_MS)
+  }, [clearSyncTimers, persistPendingBuffer])
+
+  useEffect(() => {
+    flushPendingSyncRef.current = flushPendingSync
+  }, [flushPendingSync])
 
   useEffect(() => {
     let isCancelled = false
@@ -99,6 +185,8 @@ function App() {
     async function initializeCloudSync() {
       setSaveState('sync')
       setSaveMessage('Connecting to Supabase…')
+
+      const pendingBuffer = loadSyncBuffer()
 
       const authResult = await ensureSupabaseUser()
 
@@ -122,6 +210,20 @@ function App() {
       }
 
       if (!remoteResult.ok) {
+        if (pendingBuffer?.notes.length) {
+          setNotes(pendingBuffer.notes)
+          setActiveNoteId(pendingBuffer.notes[0]?.id ?? '')
+          hasPendingSaveRef.current = true
+          setSaveState(getOnlineStatus() ? 'saving' : 'offline')
+          setSaveMessage(
+            getOnlineStatus()
+              ? 'Reconnecting and syncing queued changes…'
+              : 'Offline. Changes are queued and will sync when you reconnect.',
+          )
+          setIsCloudReady(true)
+          return
+        }
+
         setSaveState('error')
         setSaveMessage(`Supabase load failed: ${remoteResult.error}`)
         return
@@ -129,25 +231,36 @@ function App() {
 
       const remoteNotes = remoteResult.data
 
+      if (pendingBuffer?.notes.length) {
+        setNotes(pendingBuffer.notes)
+        setActiveNoteId((currentActiveId) =>
+          pendingBuffer.notes.some((note) => note.id === currentActiveId)
+            ? currentActiveId
+            : pendingBuffer.notes[0]?.id ?? '',
+        )
+        hasPendingSaveRef.current = true
+        setSaveState(getOnlineStatus() ? 'saving' : 'offline')
+        setSaveMessage(
+          getOnlineStatus()
+            ? 'Syncing queued changes to Supabase…'
+            : 'Offline. Changes are queued and will sync when you reconnect.',
+        )
+        setIsCloudReady(true)
+        return
+      }
+
       if (!remoteNotes.length) {
         const firstNote = createNote()
-        const createResult = await syncCloudNotes(userId, [firstNote])
-
-        if (isCancelled) {
-          return
-        }
-
-        if (!createResult.ok) {
-          setSaveState('error')
-          setSaveMessage(`Supabase sync failed: ${createResult.error}`)
-          return
-        }
-
-        skipNextCloudSyncRef.current = true
         setNotes([firstNote])
         setActiveNoteId(firstNote.id)
-        setSaveState('saved')
-        setSaveMessage('All changes synced to Supabase.')
+        hasPendingSaveRef.current = true
+        persistPendingBuffer([firstNote])
+        setSaveState(getOnlineStatus() ? 'saving' : 'offline')
+        setSaveMessage(
+          getOnlineStatus()
+            ? 'Saving your first note to Supabase…'
+            : 'Offline. Changes are queued and will sync when you reconnect.',
+        )
         setIsCloudReady(true)
         return
       }
@@ -156,7 +269,7 @@ function App() {
       setNotes(remoteNotes)
       setActiveNoteId(remoteNotes[0]?.id ?? '')
       setSaveState('saved')
-      setSaveMessage('All changes synced to Supabase.')
+      setSaveMessage('All changes saved to Supabase.')
       setIsCloudReady(true)
     }
 
@@ -164,8 +277,9 @@ function App() {
 
     return () => {
       isCancelled = true
+      clearSyncTimers()
     }
-  }, [])
+  }, [clearSyncTimers, flushPendingSync, persistPendingBuffer])
 
   useEffect(() => {
     if (!cloudUserId) {
@@ -193,9 +307,70 @@ function App() {
           : remoteResult.data[0]?.id ?? '',
       )
       setSaveState('saved')
-      setSaveMessage('All changes synced to Supabase.')
+      setSaveMessage('All changes saved to Supabase.')
     })
   }, [cloudUserId])
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true)
+
+      if (!hasPendingSaveRef.current) {
+        setSaveState('saved')
+        setSaveMessage('Back online. All changes saved to Supabase.')
+        return
+      }
+
+      setSaveState('saving')
+      setSaveMessage('Back online. Syncing queued changes…')
+      void flushPendingSync()
+    }
+
+    const handleOffline = () => {
+      setIsOnline(false)
+
+      if (hasPendingSaveRef.current) {
+        setSaveState('offline')
+        setSaveMessage('Offline. Changes are queued and will sync when you reconnect.')
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && getOnlineStatus() && hasPendingSaveRef.current) {
+        void flushPendingSync()
+      }
+    }
+
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [flushPendingSync])
+
+  useEffect(() => {
+    const handlePageExit = () => {
+      if (hasPendingSaveRef.current) {
+        persistPendingBuffer(notesRef.current)
+      }
+
+      if (getOnlineStatus() && hasPendingSaveRef.current) {
+        void flushPendingSync()
+      }
+    }
+
+    window.addEventListener('pagehide', handlePageExit)
+    window.addEventListener('beforeunload', handlePageExit)
+
+    return () => {
+      window.removeEventListener('pagehide', handlePageExit)
+      window.removeEventListener('beforeunload', handlePageExit)
+    }
+  }, [flushPendingSync, persistPendingBuffer])
 
   useEffect(() => {
     if (!cloudUserId) {
@@ -212,30 +387,32 @@ function App() {
     }
 
     hasPendingSaveRef.current = true
-
-    if (cloudSyncTimeoutRef.current) {
-      window.clearTimeout(cloudSyncTimeoutRef.current)
+    if (!persistPendingBuffer(notesRef.current)) {
+      return
     }
 
-    cloudSyncTimeoutRef.current = window.setTimeout(async () => {
-      const syncResult = await syncCloudNotes(cloudUserId, notesRef.current)
-      hasPendingSaveRef.current = false
+    clearSyncTimers()
 
-      if (syncResult.ok) {
-        setSaveState('saved')
-        setSaveMessage('All changes synced to Supabase.')
-      } else {
-        setSaveState('error')
-        setSaveMessage(`Supabase sync failed: ${syncResult.error}`)
-      }
-    }, 900)
+    if (!isOnline) {
+      setSaveState('offline')
+      setSaveMessage('Offline. Changes are queued and will sync when you reconnect.')
+      return
+    }
+
+    setSaveState('saving')
+    setSaveMessage('Saving changes to Supabase…')
+
+    cloudSyncTimeoutRef.current = window.setTimeout(async () => {
+      await flushPendingSync()
+    }, SAVE_DEBOUNCE_MS)
 
     return () => {
       if (cloudSyncTimeoutRef.current) {
         window.clearTimeout(cloudSyncTimeoutRef.current)
+        cloudSyncTimeoutRef.current = null
       }
     }
-  }, [cloudUserId, notes])
+  }, [clearSyncTimers, cloudUserId, flushPendingSync, isOnline, notes, persistPendingBuffer])
 
   const activeNote = notes.find((note) => note.id === activeNoteId) ?? notes[0]
   const tagSummaries = getTagSummaries(notes)
