@@ -51,6 +51,7 @@ type PendingTagFocus = {
   noteId: string
   tagId: string
   occurrenceIndex: number
+  requestId: number
 }
 
 type PageView = 'editor' | 'notes' | 'tags'
@@ -454,6 +455,18 @@ function App() {
   const activeTagId = effectiveSelectedTagId || tagSearchSuggestions[0]?.id || ''
   const activeTagResults = activeTagId ? findTagResults(notes, activeTagId) : []
   const activeTagLabel = tagSummaries.find((tag) => tag.id === activeTagId)?.label ?? activeTagId
+  const pendingTagLabel = pendingTagFocus
+    ? tagSummaries.find((tag) => tag.id === pendingTagFocus.tagId)?.label ?? pendingTagFocus.tagId
+    : ''
+  const activeNoteTagResults =
+    pendingTagFocus && pendingTagFocus.noteId === activeNote?.id
+      ? findTagResults([activeNote], pendingTagFocus.tagId)
+      : []
+  const activeNoteTagPosition = pendingTagFocus
+    ? activeNoteTagResults.findIndex(
+        (result) => result.occurrenceIndex === pendingTagFocus.occurrenceIndex,
+      )
+    : -1
 
   const hasNoTagMatches = Boolean(normalizedSearch) && !tagSearchSuggestions.length
   const shouldShowSuggestionList = Boolean(normalizedSearch)
@@ -524,6 +537,30 @@ function App() {
     setCurrentPage('editor')
   }
 
+  function jumpToTagOccurrence(direction: 'previous' | 'next') {
+    if (!pendingTagFocus || !activeNoteTagResults.length) {
+      return
+    }
+
+    const currentIndex = activeNoteTagPosition >= 0 ? activeNoteTagPosition : 0
+    const nextIndex =
+      direction === 'next'
+        ? (currentIndex + 1) % activeNoteTagResults.length
+        : (currentIndex + activeNoteTagResults.length - 1) % activeNoteTagResults.length
+    const nextOccurrence = activeNoteTagResults[nextIndex]
+
+    if (!nextOccurrence) {
+      return
+    }
+
+    setPendingTagFocus({
+      noteId: nextOccurrence.noteId,
+      tagId: nextOccurrence.tagId,
+      occurrenceIndex: nextOccurrence.occurrenceIndex,
+      requestId: Date.now(),
+    })
+  }
+
   if (!isCloudReady || !activeNote) {
     return (
       <div className="app-shell">
@@ -591,9 +628,13 @@ function App() {
             <EditorPanel
               note={activeNote}
               onContentChange={(content) => updateCurrentNote({ content })}
-              onFocusHandled={() => setPendingTagFocus(null)}
               onTitleChange={(title) => updateCurrentNote({ title })}
               pendingTagFocus={pendingTagFocus}
+              onJumpToNext={() => jumpToTagOccurrence('next')}
+              onJumpToPrevious={() => jumpToTagOccurrence('previous')}
+              tagJumpLabel={pendingTagLabel}
+              tagJumpPosition={activeNoteTagPosition >= 0 ? activeNoteTagPosition + 1 : 0}
+              tagJumpTotal={activeNoteTagResults.length}
               tagSuggestions={tagSuggestionItems}
             />
           ) : null}
@@ -731,6 +772,7 @@ function App() {
                               noteId: result.noteId,
                               tagId: result.tagId,
                               occurrenceIndex: result.occurrenceIndex,
+                              requestId: Date.now(),
                             })
                             setCurrentPage('editor')
                           }}
@@ -758,7 +800,11 @@ type EditorPanelProps = {
   onContentChange: (content: JSONContent) => void
   onTitleChange: (title: string) => void
   pendingTagFocus: PendingTagFocus | null
-  onFocusHandled: () => void
+  onJumpToNext: () => void
+  onJumpToPrevious: () => void
+  tagJumpLabel: string
+  tagJumpPosition: number
+  tagJumpTotal: number
   tagSuggestions: TagSuggestionItem[]
 }
 
@@ -767,10 +813,15 @@ function EditorPanel({
   onContentChange,
   onTitleChange,
   pendingTagFocus,
-  onFocusHandled,
+  onJumpToNext,
+  onJumpToPrevious,
+  tagJumpLabel,
+  tagJumpPosition,
+  tagJumpTotal,
   tagSuggestions,
 }: EditorPanelProps) {
   const activeNoteRef = useRef(note.id)
+  const highlightedTagElementRef = useRef<HTMLElement | null>(null)
   const [tagSuggestionStore] = useState(() => ({
     items: tagSuggestions,
     getItems() {
@@ -830,7 +881,15 @@ function EditorPanel({
   }, [editor, note.content, note.id])
 
   useEffect(() => {
+    const clearHighlightedTag = () => {
+      if (highlightedTagElementRef.current) {
+        highlightedTagElementRef.current.classList.remove('is-jump-target')
+        highlightedTagElementRef.current = null
+      }
+    }
+
     if (!editor || !pendingTagFocus || pendingTagFocus.noteId !== note.id) {
+      clearHighlightedTag()
       return
     }
 
@@ -854,8 +913,27 @@ function EditorPanel({
       editor.chain().focus().setTextSelection(selection).run()
     }
 
-    onFocusHandled()
-  }, [editor, note.id, onFocusHandled, pendingTagFocus])
+    clearHighlightedTag()
+
+    const tagElements = Array.from(
+      editor.view.dom.querySelectorAll(`.tag-token[data-tag-id="${pendingTagFocus.tagId}"]`),
+    ) as HTMLElement[]
+    const targetElement = tagElements[pendingTagFocus.occurrenceIndex - 1]
+
+    if (targetElement) {
+      targetElement.classList.add('is-jump-target')
+      highlightedTagElementRef.current = targetElement
+      targetElement.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'nearest',
+      })
+    }
+
+    return () => {
+      clearHighlightedTag()
+    }
+  }, [editor, note.id, pendingTagFocus])
 
   const editorState = useEditorState({
     editor,
@@ -1144,6 +1222,24 @@ function EditorPanel({
           </div>
         </div>
       </div>
+      {tagJumpTotal > 0 ? (
+        <div className="tag-jump-bar">
+          <div className="tag-jump-copy">
+            <strong>#{tagJumpLabel}</strong>
+            <span>
+              {tagJumpPosition} of {tagJumpTotal}
+            </span>
+          </div>
+          <div className="tag-jump-actions">
+            <button className="ghost-button" onClick={onJumpToPrevious} type="button">
+              Previous
+            </button>
+            <button className="primary-button" onClick={onJumpToNext} type="button">
+              Next
+            </button>
+          </div>
+        </div>
+      ) : null}
       <section className="editor-surface">
         <div className="document-stage">
           <article className="document-page">
