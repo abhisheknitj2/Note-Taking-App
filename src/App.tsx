@@ -32,10 +32,6 @@ import {
   findTagResults,
   formatNoteDate,
   getTagSummaries,
-  loadNotes,
-  parseStoredNotes,
-  saveNotes,
-  STORAGE_KEY,
   type Note,
 } from './lib/notes'
 import {
@@ -76,108 +72,26 @@ const TEXT_COLORS = ['#1f2328', '#5f6368', '#0b57d0', '#196c2e', '#b3261e', '#7c
 const HIGHLIGHT_COLORS = ['#fff59d', '#ffd9a8', '#b9f6ca', '#d7efff', '#f0d9ff', '#ffd6e7']
 const PARAGRAPH_STYLES = [{ label: 'Normal text', value: 'paragraph' }]
 
-function getLatestTimestamp(notes: Note[]) {
-  return notes.reduce(
-    (latest, note) => (note.updatedAt > latest ? note.updatedAt : latest),
-    '',
-  )
-}
-
 function App() {
-  const [initialState] = useState(() => {
-    const loadedNotes = loadNotes()
-
-    return {
-      notes: loadedNotes,
-      activeNoteId: loadedNotes[0]?.id ?? '',
-    }
-  })
-  const [notes, setNotes] = useState<Note[]>(initialState.notes)
-  const [activeNoteId, setActiveNoteId] = useState(initialState.activeNoteId)
+  const [notes, setNotes] = useState<Note[]>([])
+  const [activeNoteId, setActiveNoteId] = useState('')
   const [currentPage, setCurrentPage] = useState<PageView>('editor')
   const [tagSearch, setTagSearch] = useState('')
   const [selectedTagId, setSelectedTagId] = useState('')
   const [pendingTagFocus, setPendingTagFocus] = useState<PendingTagFocus | null>(null)
-  const [saveState, setSaveState] = useState<SaveState>('saved')
-  const [saveMessage, setSaveMessage] = useState('All changes saved locally.')
+  const [saveState, setSaveState] = useState<SaveState>('sync')
+  const [saveMessage, setSaveMessage] = useState('Connecting to Supabase…')
   const [cloudUserId, setCloudUserId] = useState('')
+  const [isCloudReady, setIsCloudReady] = useState(false)
   const deferredTagSearch = useDeferredValue(tagSearch)
   const notesRef = useRef(notes)
   const hasPendingSaveRef = useRef(false)
-  const saveTimeoutRef = useRef<number | null>(null)
   const cloudSyncTimeoutRef = useRef<number | null>(null)
   const skipNextCloudSyncRef = useRef(false)
 
   useEffect(() => {
     notesRef.current = notes
   }, [notes])
-
-  useEffect(() => {
-    hasPendingSaveRef.current = true
-
-    if (saveTimeoutRef.current) {
-      window.clearTimeout(saveTimeoutRef.current)
-    }
-
-    saveTimeoutRef.current = window.setTimeout(() => {
-      const result = saveNotes(notesRef.current)
-      hasPendingSaveRef.current = false
-
-      if (result.ok) {
-        setSaveState('saved')
-        setSaveMessage('All changes saved locally.')
-      } else {
-        setSaveState('error')
-        setSaveMessage(`Local save failed: ${result.error ?? 'Storage unavailable.'}`)
-      }
-    }, 350)
-
-    return () => {
-      if (saveTimeoutRef.current) {
-        window.clearTimeout(saveTimeoutRef.current)
-      }
-    }
-  }, [notes])
-
-  useEffect(() => {
-    const flushPendingSave = () => {
-      if (!hasPendingSaveRef.current) {
-        return
-      }
-
-      if (saveTimeoutRef.current) {
-        window.clearTimeout(saveTimeoutRef.current)
-        saveTimeoutRef.current = null
-      }
-
-      const result = saveNotes(notesRef.current)
-      hasPendingSaveRef.current = false
-
-      if (result.ok) {
-        setSaveState('saved')
-        setSaveMessage('All changes saved locally.')
-      } else {
-        setSaveState('error')
-        setSaveMessage(`Local save failed: ${result.error ?? 'Storage unavailable.'}`)
-      }
-    }
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        flushPendingSave()
-      }
-    }
-
-    window.addEventListener('pagehide', flushPendingSave)
-    window.addEventListener('beforeunload', flushPendingSave)
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-
-    return () => {
-      window.removeEventListener('pagehide', flushPendingSave)
-      window.removeEventListener('beforeunload', flushPendingSave)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-    }
-  }, [])
 
   useEffect(() => {
     let isCancelled = false
@@ -194,7 +108,7 @@ function App() {
 
       if (!authResult.ok) {
         setSaveState('error')
-        setSaveMessage(`Supabase unavailable. Local-only mode: ${authResult.error}`)
+        setSaveMessage(`Supabase unavailable: ${authResult.error}`)
         return
       }
 
@@ -209,66 +123,41 @@ function App() {
 
       if (!remoteResult.ok) {
         setSaveState('error')
-        setSaveMessage(`Supabase load failed. Local cache kept: ${remoteResult.error}`)
+        setSaveMessage(`Supabase load failed: ${remoteResult.error}`)
         return
       }
 
-      const localNotes = notesRef.current
       const remoteNotes = remoteResult.data
-      const latestLocalTimestamp = getLatestTimestamp(localNotes)
-      const latestRemoteTimestamp = getLatestTimestamp(remoteNotes)
 
-      if (!remoteNotes.length && localNotes.length) {
-        const migrateResult = await syncCloudNotes(userId, localNotes)
+      if (!remoteNotes.length) {
+        const firstNote = createNote()
+        const createResult = await syncCloudNotes(userId, [firstNote])
 
         if (isCancelled) {
           return
         }
 
-        if (!migrateResult.ok) {
+        if (!createResult.ok) {
           setSaveState('error')
-          setSaveMessage(`Supabase upload failed. Local cache kept: ${migrateResult.error}`)
+          setSaveMessage(`Supabase sync failed: ${createResult.error}`)
           return
         }
 
-        setSaveState('saved')
-        setSaveMessage('Local notes uploaded to Supabase.')
-        return
-      }
-
-      if (remoteNotes.length && latestRemoteTimestamp >= latestLocalTimestamp) {
         skipNextCloudSyncRef.current = true
-        setNotes(remoteNotes)
-        setActiveNoteId((currentActiveId) =>
-          remoteNotes.some((note) => note.id === currentActiveId)
-            ? currentActiveId
-            : remoteNotes[0]?.id ?? '',
-        )
+        setNotes([firstNote])
+        setActiveNoteId(firstNote.id)
         setSaveState('saved')
-        setSaveMessage('Notes synced from Supabase.')
+        setSaveMessage('All changes synced to Supabase.')
+        setIsCloudReady(true)
         return
       }
 
-      if (remoteNotes.length && latestLocalTimestamp > latestRemoteTimestamp) {
-        const pushResult = await syncCloudNotes(userId, localNotes)
-
-        if (isCancelled) {
-          return
-        }
-
-        if (!pushResult.ok) {
-          setSaveState('error')
-          setSaveMessage(`Supabase sync failed. Local cache kept: ${pushResult.error}`)
-          return
-        }
-
-        setSaveState('saved')
-        setSaveMessage('Local changes synced to Supabase.')
-        return
-      }
-
+      skipNextCloudSyncRef.current = true
+      setNotes(remoteNotes)
+      setActiveNoteId(remoteNotes[0]?.id ?? '')
       setSaveState('saved')
-      setSaveMessage('Connected to Supabase.')
+      setSaveMessage('All changes synced to Supabase.')
+      setIsCloudReady(true)
     }
 
     void initializeCloudSync()
@@ -297,14 +186,14 @@ function App() {
       }
 
       skipNextCloudSyncRef.current = true
-      setNotes(remoteResult.data.length ? remoteResult.data : [createNote()])
+      setNotes(remoteResult.data.length ? remoteResult.data : [])
       setActiveNoteId((currentActiveId) =>
         remoteResult.data.some((note) => note.id === currentActiveId)
           ? currentActiveId
           : remoteResult.data[0]?.id ?? '',
       )
-      setSaveState('sync')
-      setSaveMessage('Received latest notes from Supabase.')
+      setSaveState('saved')
+      setSaveMessage('All changes synced to Supabase.')
     })
   }, [cloudUserId])
 
@@ -318,19 +207,26 @@ function App() {
       return
     }
 
+    if (!notes.length) {
+      return
+    }
+
+    hasPendingSaveRef.current = true
+
     if (cloudSyncTimeoutRef.current) {
       window.clearTimeout(cloudSyncTimeoutRef.current)
     }
 
     cloudSyncTimeoutRef.current = window.setTimeout(async () => {
       const syncResult = await syncCloudNotes(cloudUserId, notesRef.current)
+      hasPendingSaveRef.current = false
 
       if (syncResult.ok) {
         setSaveState('saved')
         setSaveMessage('All changes synced to Supabase.')
       } else {
         setSaveState('error')
-        setSaveMessage(`Supabase sync failed. Local cache kept: ${syncResult.error}`)
+        setSaveMessage(`Supabase sync failed: ${syncResult.error}`)
       }
     }, 900)
 
@@ -340,41 +236,6 @@ function App() {
       }
     }
   }, [cloudUserId, notes])
-
-  useEffect(() => {
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key !== STORAGE_KEY) {
-        return
-      }
-
-      const incomingNotes = parseStoredNotes(event.newValue)
-
-      if (!incomingNotes) {
-        return
-      }
-
-      if (hasPendingSaveRef.current) {
-        setSaveState('sync')
-        setSaveMessage('Another tab changed local cache. Unsaved current-tab changes were kept.')
-        return
-      }
-
-      setNotes(incomingNotes)
-      setActiveNoteId((currentActiveId) =>
-        incomingNotes.some((note) => note.id === currentActiveId)
-          ? currentActiveId
-          : incomingNotes[0]?.id ?? '',
-      )
-      setSaveState('sync')
-      setSaveMessage('Notes updated from another tab.')
-    }
-
-    window.addEventListener('storage', handleStorage)
-
-    return () => {
-      window.removeEventListener('storage', handleStorage)
-    }
-  }, [])
 
   const activeNote = notes.find((note) => note.id === activeNoteId) ?? notes[0]
   const tagSummaries = getTagSummaries(notes)
@@ -398,7 +259,7 @@ function App() {
 
   function updateCurrentNote(patch: Partial<Pick<Note, 'title' | 'content'>>) {
     setSaveState('saving')
-    setSaveMessage('Saving changes locally…')
+    setSaveMessage('Syncing to Supabase…')
     setNotes((currentNotes) =>
       currentNotes.map((note) =>
         note.id === activeNoteId
@@ -415,7 +276,7 @@ function App() {
   function handleCreateNote() {
     const newNote = createNote()
     setSaveState('saving')
-    setSaveMessage('Saving changes locally…')
+    setSaveMessage('Syncing to Supabase…')
     setNotes((currentNotes) => [newNote, ...currentNotes])
     setActiveNoteId(newNote.id)
     setPendingTagFocus(null)
@@ -426,7 +287,7 @@ function App() {
     if (notes.length === 1) {
       const freshNote = createNote()
       setSaveState('saving')
-      setSaveMessage('Saving changes locally…')
+      setSaveMessage('Syncing to Supabase…')
       setNotes([freshNote])
       setActiveNoteId(freshNote.id)
       setPendingTagFocus(null)
@@ -434,7 +295,7 @@ function App() {
     }
 
     setSaveState('saving')
-    setSaveMessage('Saving changes locally…')
+    setSaveMessage('Syncing to Supabase…')
     setNotes((currentNotes) => currentNotes.filter((note) => note.id !== noteId))
 
     if (activeNoteId === noteId) {
@@ -457,8 +318,38 @@ function App() {
     setCurrentPage('editor')
   }
 
-  if (!activeNote) {
-    return null
+  if (!isCloudReady || !activeNote) {
+    return (
+      <div className="app-shell">
+        <main className="workspace">
+          <div className="docs-chrome">
+            <nav className="workspace-nav" aria-label="Section navigation">
+              <button className="workspace-nav-link active" type="button">
+                <span>Editor</span>
+              </button>
+              <button className="workspace-nav-link" type="button">
+                <span>Notes</span>
+              </button>
+              <button className="workspace-nav-link" type="button">
+                <span>Tag Search</span>
+              </button>
+              <span className={`workspace-save-state ${saveState}`}>{saveMessage}</span>
+            </nav>
+
+            <section className="workspace-page">
+              <div className="page-shell">
+                <section className="sidebar-panel page-panel">
+                  <div className="panel-heading">
+                    <h2>Supabase</h2>
+                  </div>
+                  <p>{saveMessage}</p>
+                </section>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    )
   }
 
   return (

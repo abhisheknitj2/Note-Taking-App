@@ -19,6 +19,9 @@ export type CloudResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string }
 
+const ANONYMOUS_AUTH_DISABLED_MESSAGE =
+  'Anonymous sign-ins are disabled in this Supabase project. Enable them in Supabase Dashboard > Authentication > Sign In / Providers > Anonymous.'
+
 type NoteRecord = {
   id: string
   user_id: string
@@ -66,11 +69,14 @@ export async function ensureSupabaseUser(): Promise<CloudResult<User>> {
   const { data, error } = await supabase.auth.signInAnonymously()
 
   if (error || !data.user) {
+    const message = error?.message ?? ''
+
     return {
       ok: false,
       error:
-        error?.message ??
-        'Anonymous auth failed. Enable Anonymous sign-ins in Supabase Auth settings.',
+        message.includes('Anonymous sign-ins are disabled')
+          ? ANONYMOUS_AUTH_DISABLED_MESSAGE
+          : message || ANONYMOUS_AUTH_DISABLED_MESSAGE,
     }
   }
 
